@@ -1,7 +1,8 @@
-fastapi==0.111.0
-uvicorn==0.29.0
-pydantic==1.10.15
+fastapi==0.95.2
+uvicorn==0.22.0
+pydantic==1.10.12
 sqlalchemy==2.0.30
-slowapi==0.1.7
-psycopg2-binary==2.9.9
 python-dotenv==1.0.1
+psycopg2-binary==2.9.9
+python-multipart==0.0.20
+slowapi==0.1.7
