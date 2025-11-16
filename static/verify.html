@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Fimonova – Zertifikatsprüfung</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+
+  <!-- ====== HEADER ====== -->
+  <header class="site-header">
+    <div class="header-container">
+      <img src="header_strip_transparent.png" class="logo-img" alt="Fimonova Logo">
+      
+    </div>
+  </header>
+
+  <!-- ====== MAIN CARD ====== -->
+  <main class="card">
+    <div class="verify-container">
+      <h1 class="header-title">Zertifikatsprüfung</h1>
+      <form id="verify-form">
+        <label>Seriennummer (SN)
+          <input type="text" name="serial_number" id="serial" required />
+        </label>
+
+        <label>Prüfcode (RC)
+          <input type="text" name="random_code" id="random" required />
+        </label>
+
+        <button class="check" type="submit">Prüfen</button>
+      </form>
+
+      <div id="result" class="result"></div>
+
+    </div>
+  </main>
+
+  <!-- ====== FOOTER NAVIGATION ====== -->
+  <footer class="footer">
+    <p>Fimonova Kosmetik Akademie – Zertifikatsprüfung</p>
+  </footer>
+
+  <script src="/static/verify.js"></script>
+</body>
+</html>
