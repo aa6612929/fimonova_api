@@ -2,16 +2,8 @@ services:
   - type: web
     name: fimonova-api
     env: python
-    region: frankfurt
-    plan: free
+    pythonVersion: 3.11
     buildCommand: "pip install -r requirements.txt"
     startCommand: "uvicorn api_server_minimal:app --host 0.0.0.0 --port 10000"
-    envVars:
-      - key: DATABASE_URL
-        sync: false
-      - key: FIMONOVA_API_KEY
-        sync: false
-      - key: FIMONOVA_HMAC_SECRET
-        sync: false
-      - key: TIMESTAMP_WINDOW
-        value: "300"
+    plan: free
+    
