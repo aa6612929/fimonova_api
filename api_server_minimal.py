@@ -28,7 +28,7 @@ from models import Certificate
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import pathlib
-
+import create_tables
 
 # =======================================================
 # 🔥 حماية /gate — Rate Limit + Block + Bot Protection + Logs
