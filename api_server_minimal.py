@@ -294,10 +294,10 @@ async def gate_check(request: Request, payload: dict, db: Session = Depends(get_
         raise HTTPException(status_code=400, detail="serial_number and random_code required")
 
     # 1️⃣ Bot Protection
-    ua = request.headers.get("User-Agent", "")
-    if ua.strip() == "" or "python" in ua.lower() or "bot" in ua.lower():
-        log_attempt(ip, serial, random_code, "blocked_bot")
-        raise HTTPException(status_code=403, detail="Bot access blocked")
+    #ua = request.headers.get("User-Agent", "")
+    #if ua.strip() == "" or "python" in ua.lower() or "bot" in ua.lower():
+    #    log_attempt(ip, serial, random_code, "blocked_bot")
+    #    raise HTTPException(status_code=403, detail="Bot access blocked")
 
     # 2️⃣ هل IP محظور؟
     if ip in BLOCKED_IPS and now < BLOCKED_IPS[ip]:
