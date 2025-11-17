@@ -21,7 +21,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, validator
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, select
-
+from fastapi.responses import FileResponse
+import pathlib
 from database import SessionLocal, engine
 from models import Certificate
 
@@ -424,6 +425,11 @@ def search_app(payload: dict, db: Session = Depends(get_db)):
         "certificates": certificates
     }
 
+
+
+@app.get("/verify.html")
+def get_verify():
+    return FileResponse(pathlib.Path(__file__).parent / "verify.html")
 
 
 # =======================
