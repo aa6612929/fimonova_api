@@ -246,3 +246,8 @@ async def verify_page(firstname: str, lastname: str, birthdate: str,
     if not row:
         return {"found": False}
     return {"found": True, "student": dict(row)}
+
+
+@app.get("/")
+async def root():
+    return {"status": "ok", "service": "fimonova_api"}
