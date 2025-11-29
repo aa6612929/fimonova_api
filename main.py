@@ -251,3 +251,9 @@ async def verify_page(firstname: str, lastname: str, birthdate: str,
 @app.get("/")
 async def root():
     return {"status": "ok", "service": "fimonova_api"}
+
+
+@app.get("/wake")
+async def wake():
+    # ما في منطق، المهم يرجع بسرعة ويصحّي السيرفر
+    return {"status": "awake"}
