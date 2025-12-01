@@ -11,5 +11,13 @@ CREATE TABLE IF NOT EXISTS students (
   cert_random_code TEXT
 );
 
+-- جدول بسيط لتخزين كلمة سر تطبيق التجنر (بشكل مُشفّر)
+CREATE TABLE IF NOT EXISTS app_password (
+  id SERIAL PRIMARY KEY,
+  password_hash TEXT NOT NULL,
+  updated_at   TEXT
+);
+
+
 CREATE INDEX IF NOT EXISTS idx_students_name_birth
 ON students (firstname, lastname, birthdate);

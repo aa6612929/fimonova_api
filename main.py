@@ -9,7 +9,7 @@ load_dotenv()  # تحميل متغيرات البيئة من ملف .env
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://fimodb_user:o4gHKsxV262NQAVzH7A7DsUebFS6a7F3@dpg-d4ku7didbo4c73e78720-a.oregon-postgres.render.com/fimodb")
 API_KEY = os.getenv("API_KEY", "your_api_key_hereasdasdasd")
 HMAC_SECRET = os.getenv("HMAC_SECRET", "your_hmac_secret_hereasdasdasdasd")
-
+from datetime import datetime
 # الحد الأقصى لحجم قاعدة البيانات بالبايت (تقديري)
 # لو عندك في الخطة 1GB مثلاً، خليه 1000000000
 DB_MAX_BYTES = int(os.getenv("DB_MAX_BYTES", "1000000000"))
@@ -36,6 +36,13 @@ students = sqlalchemy.Table(
     sqlalchemy.Column("cert_serial_sn", sqlalchemy.Text),
     sqlalchemy.Column("cert_random_code", sqlalchemy.Text)
 )
+app_password = sqlalchemy.Table(
+    "app_password",
+    metadata,
+    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
+    sqlalchemy.Column("password_hash", sqlalchemy.Text),
+    sqlalchemy.Column("updated_at", sqlalchemy.Text),
+)
 
 app = FastAPI(title="Fimonova Remote API")
 
@@ -56,6 +63,15 @@ class StudentPayload(BaseModel):
     cert_name: str
     cert_serial_sn: str
     cert_random_code: str
+
+class PasswordPayload(BaseModel):
+    password: str
+
+
+class ChangePasswordPayload(BaseModel):
+    old_password: str
+    new_password: str
+
 
 # ---- Utilities ----
 def canonical_json(obj):
@@ -79,6 +95,45 @@ def verify_request_signature(body_obj, x_signature: str, x_timestamp: str, autho
     expected = hmac.new(HMAC_SECRET.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, x_signature):
         raise HTTPException(401, "Invalid signature")
+
+from datetime import datetime  # تأكد أنه مستورد في أعلى الملف
+
+def hash_password(p: str) -> str:
+    """
+    تشفير كلمة السر باستخدام SHA256 (ما نخزنها نص خام أبدًا)
+    """
+    return hashlib.sha256(p.encode("utf-8")).hexdigest()
+
+
+async def get_password_row():
+    """
+    إرجاع أول صف من جدول app_password (غالبًا واحد فقط).
+    """
+    query = app_password.select().limit(1)
+    return await database.fetch_one(query)
+
+
+async def set_password_hash(new_hash: str):
+    """
+    حفظ/تحديث الـ hash في جدول app_password
+    """
+    now = datetime.utcnow().isoformat()
+    row = await get_password_row()
+
+    if row:
+        query = (
+            app_password.update()
+            .where(app_password.c.id == row["id"])
+            .values(password_hash=new_hash, updated_at=now)
+        )
+        await database.execute(query)
+    else:
+        query = app_password.insert().values(
+            password_hash=new_hash,
+            updated_at=now
+        )
+        await database.execute(query)
+
 
 # ---- DB helpers ----
 async def upsert_student(payload: dict):
@@ -364,3 +419,51 @@ async def wake_public(request: Request):
     if origin not in ALLOWED_PUBLIC_ORIGINS:
         raise HTTPException(403, "Forbidden origin")
     return {"status": "awake"}
+
+
+@app.post("/check_password")
+async def check_password_endpoint(
+    payload: PasswordPayload,
+    request: Request,
+    x_signature: str = Header(None),
+    x_timestamp: str = Header(None),
+    authorization: str = Header(None),
+):
+    # نستخدم نفس الدالة اللي عندك للتحقق من التوقيع
+    # تأكد إن اسمها صحيح (غالباً verify_request_signature)
+    body = payload.dict()
+    verify_request_signature(body, x_signature, x_timestamp, authorization)
+
+    row = await get_password_row()
+    if not row or not row["password_hash"]:
+        # لم يتم ضبط كلمة سر بعد
+        return {"ok": False, "reason": "no_password_configured"}
+
+    ok = hash_password(body["password"]) == row["password_hash"]
+    return {"ok": ok}
+
+
+
+@app.post("/set_password")
+async def set_password_endpoint(
+    payload: ChangePasswordPayload,
+    request: Request,
+    x_signature: str = Header(None),
+    x_timestamp: str = Header(None),
+    authorization: str = Header(None),
+):
+    body = payload.dict()
+    verify_request_signature(body, x_signature, x_timestamp, authorization)
+
+    row = await get_password_row()
+
+    # لو عندنا باسورد قديم، نتحقق منه
+    if row and row["password_hash"]:
+        if hash_password(body["old_password"]) != row["password_hash"]:
+            raise HTTPException(status_code=400, detail="Old password is incorrect")
+
+    # لو ما كان في باسورد سابق، أو كان صح → نحدّث
+    await set_password_hash(hash_password(body["new_password"]))
+    return {"ok": True}
+
+
