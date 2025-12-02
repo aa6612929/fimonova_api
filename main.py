@@ -1,29 +1,46 @@
-# main.py
-import os, time, hmac, hashlib, json
+import os
+import time
+import hmac
+import hashlib
+import json
+import re
+from datetime import datetime, timedelta
+
 from fastapi import FastAPI, Request, HTTPException, Header
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import databases
 import sqlalchemy
-from dotenv import load_dotenv  
-load_dotenv()  # تحميل متغيرات البيئة من ملف .env
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://fimodb_user:o4gHKsxV262NQAVzH7A7DsUebFS6a7F3@dpg-d4ku7didbo4c73e78720-a.oregon-postgres.render.com/fimodb")
+from dotenv import load_dotenv
+
+# تحميل متغيرات البيئة من ملف .env
+load_dotenv()
+
+# ===== إعدادات الاتصال وقيم عامة =====
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://fimodb_user:o4gHKsxV262NQAVzH7A7DsUebFS6a7F3@dpg-d4ku7didbo4c73e78720-a.oregon-postgres.render.com/fimodb"
+)
 API_KEY = os.getenv("API_KEY", "your_api_key_hereasdasdasd")
 HMAC_SECRET = os.getenv("HMAC_SECRET", "your_hmac_secret_hereasdasdasdasd")
-from datetime import datetime
-# الحد الأقصى لحجم قاعدة البيانات بالبايت (تقديري)
-# لو عندك في الخطة 1GB مثلاً، خليه 1000000000
-DB_MAX_BYTES = int(os.getenv("DB_MAX_BYTES", "1000000000"))
 
+DB_MAX_BYTES = int(os.getenv("DB_MAX_BYTES", "1000000000"))
 
 ALLOWED_PUBLIC_ORIGINS = [
     "https://fimonova-kosmetik.de",
-    "https://www.fimonova-kosmetik.de"
+    "https://www.fimonova-kosmetik.de",
 ]
 
+# إعدادات نظام كلمة السر للتطبيق
+MAX_LOGIN_ATTEMPTS = 3
+LOCK_SECONDS = 15 * 60   # ربع ساعة
+DEFAULT_APP_ID = "desktop_manager"
 
+# ===== إعداد قاعدة البيانات =====
 database = databases.Database(DATABASE_URL)
 metadata = sqlalchemy.MetaData()
 engine = sqlalchemy.create_engine(DATABASE_URL)
+
 # جدول الطلاب بالشهادات مباشرة
 students = sqlalchemy.Table(
     "students", metadata,
@@ -34,18 +51,30 @@ students = sqlalchemy.Table(
     sqlalchemy.Column("gender", sqlalchemy.Text),
     sqlalchemy.Column("cert_name", sqlalchemy.Text),
     sqlalchemy.Column("cert_serial_sn", sqlalchemy.Text),
-    sqlalchemy.Column("cert_random_code", sqlalchemy.Text)
-)
-app_password = sqlalchemy.Table(
-    "app_password",
-    metadata,
-    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
-    sqlalchemy.Column("password_hash", sqlalchemy.Text),
-    sqlalchemy.Column("updated_at", sqlalchemy.Text),
+    sqlalchemy.Column("cert_random_code", sqlalchemy.Text),
 )
 
+# جدول كلمة السر للتطبيق مع عداد المحاولات والقفل
+app_password_table = sqlalchemy.Table(
+    "app_password", metadata,
+    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
+    sqlalchemy.Column("app_id", sqlalchemy.Text, unique=True, nullable=False),
+    sqlalchemy.Column("password_hash", sqlalchemy.Text, nullable=False),
+    sqlalchemy.Column("failed_attempts", sqlalchemy.Integer, nullable=False, server_default="0"),
+    sqlalchemy.Column("locked_until", sqlalchemy.DateTime),
+)
+
+# ===== تطبيق FastAPI =====
 app = FastAPI(title="Fimonova Remote API")
 
+# --- CORS للصفحة العامة للتحقق ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_PUBLIC_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ---- Pydantic models ----
 
@@ -64,18 +93,23 @@ class StudentPayload(BaseModel):
     cert_serial_sn: str
     cert_random_code: str
 
-class PasswordPayload(BaseModel):
+
+class PasswordCheckPayload(BaseModel):
     password: str
+    app_id: str | None = DEFAULT_APP_ID
 
 
-class ChangePasswordPayload(BaseModel):
+class PasswordSetPayload(BaseModel):
     old_password: str
     new_password: str
+    app_id: str | None = DEFAULT_APP_ID
 
 
 # ---- Utilities ----
+
 def canonical_json(obj):
     return json.dumps(obj, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+
 
 def verify_request_signature(body_obj, x_signature: str, x_timestamp: str, authorization: str):
     if not authorization or not authorization.startswith("Bearer "):
@@ -86,66 +120,66 @@ def verify_request_signature(body_obj, x_signature: str, x_timestamp: str, autho
 
     try:
         ts = int(x_timestamp)
-    except:
+    except Exception:
         raise HTTPException(400, "Invalid timestamp")
     if abs(int(time.time()) - ts) > 300:
         raise HTTPException(400, "Timestamp out of range")
 
     message = f"{x_timestamp}.{canonical_json(body_obj)}"
-    expected = hmac.new(HMAC_SECRET.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).hexdigest()
+    expected = hmac.new(
+        HMAC_SECRET.encode("utf-8"),
+        message.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
     if not hmac.compare_digest(expected, x_signature):
         raise HTTPException(401, "Invalid signature")
 
-from datetime import datetime  # تأكد أنه مستورد في أعلى الملف
 
-def hash_password(p: str) -> str:
-    """
-    تشفير كلمة السر باستخدام SHA256 (ما نخزنها نص خام أبدًا)
-    """
-    return hashlib.sha256(p.encode("utf-8")).hexdigest()
+def hash_password(raw: str) -> str:
+    """تجزئة كلمة السر قبل التخزين أو المقارنة."""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-async def get_password_row():
+async def get_or_create_app_password(app_id: str = DEFAULT_APP_ID):
     """
-    إرجاع أول صف من جدول app_password (غالبًا واحد فقط).
+    ترجع صف كلمة السر للتطبيق.
+    لو ما فيه صف، تنشئ واحد بكلمة سر افتراضية '0000'.
     """
-    query = app_password.select().limit(1)
-    return await database.fetch_one(query)
-
-
-async def set_password_hash(new_hash: str):
-    """
-    حفظ/تحديث الـ hash في جدول app_password
-    """
-    now = datetime.utcnow().isoformat()
-    row = await get_password_row()
-
+    row = await database.fetch_one(
+        "SELECT * FROM app_password WHERE app_id = :app_id",
+        {"app_id": app_id},
+    )
     if row:
-        query = (
-            app_password.update()
-            .where(app_password.c.id == row["id"])
-            .values(password_hash=new_hash, updated_at=now)
-        )
-        await database.execute(query)
-    else:
-        query = app_password.insert().values(
-            password_hash=new_hash,
-            updated_at=now
-        )
-        await database.execute(query)
+        return row
+
+    # كلمة السر الافتراضية: 0000
+    default_hash = hash_password("0000")
+    await database.execute(
+        """
+        INSERT INTO app_password (app_id, password_hash, failed_attempts, locked_until)
+        VALUES (:app_id, :password_hash, 0, NULL)
+        ON CONFLICT (app_id) DO NOTHING
+        """,
+        {"app_id": app_id, "password_hash": default_hash},
+    )
+    row = await database.fetch_one(
+        "SELECT * FROM app_password WHERE app_id = :app_id",
+        {"app_id": app_id},
+    )
+    return row
 
 
 # ---- DB helpers ----
+
 async def upsert_student(payload: dict):
     """
-    /update:
+    /update و /add:
       - نبحث عن صف يطابق ٥ عناصر:
           firstname, lastname, birthdate, cert_name, cert_serial_sn
       - إذا وجدناه => نحدّث (gender, cert_random_code) لنفس الصف فقط.
       - إذا لم نجده => نضيف صف جديد (شهادة جديدة).
       - الـ cert_random_code لا يدخل في شرط التطابق.
     """
-
     row = await database.fetch_one(
         """
         SELECT id FROM students
@@ -165,17 +199,16 @@ async def upsert_student(payload: dict):
     )
 
     if row:
-        # ✅ نفس الشهادة (٥ عناصر متطابقة) → نحدّث فقط
         update_values = {
             "id": row["id"],
-            "gender":          payload["gender"],
+            "gender":           payload["gender"],
             "cert_random_code": payload["cert_random_code"],
         }
 
         await database.execute(
             """
             UPDATE students
-               SET gender          = :gender,
+               SET gender           = :gender,
                    cert_random_code = :cert_random_code
              WHERE id = :id
             """,
@@ -186,14 +219,13 @@ async def upsert_student(payload: dict):
             "student_id": row["id"],
         }
 
-    # ❌ لم نجد صف يطابق الخمسة عناصر → شهادة جديدة تماماً → نضيف صف جديد
     insert_values = {
-        "firstname":       payload["firstname"],
-        "lastname":        payload["lastname"],
-        "birthdate":       payload["birthdate"],
-        "gender":          payload["gender"],
-        "cert_name":       payload["cert_name"],
-        "cert_serial_sn":  payload["cert_serial_sn"],
+        "firstname":        payload["firstname"],
+        "lastname":         payload["lastname"],
+        "birthdate":        payload["birthdate"],
+        "gender":           payload["gender"],
+        "cert_name":        payload["cert_name"],
+        "cert_serial_sn":   payload["cert_serial_sn"],
         "cert_random_code": payload["cert_random_code"],
     }
 
@@ -216,30 +248,43 @@ async def upsert_student(payload: dict):
     }
 
 
+# ---- أحداث بدء/إيقاف السيرفر ----
 
-# ---- Endpoints ----
 @app.on_event("startup")
 async def startup():
     await database.connect()
-    # إنشاء الجدول إذا لم يكن موجود
-    engine = sqlalchemy.create_engine(DATABASE_URL)
     metadata.create_all(engine)
+
 
 @app.on_event("shutdown")
 async def shutdown():
     await database.disconnect()
 
+
+# ---- Endpoints أساسية لإدارة الطلاب ----
+
 @app.post("/add")
-async def add_student(payload: StudentPayload, request: Request,
-                      x_signature: str = Header(None), x_timestamp: str = Header(None), authorization: str = Header(None)):
+async def add_student(
+    payload: StudentPayload,
+    request: Request,
+    x_signature: str = Header(None),
+    x_timestamp: str = Header(None),
+    authorization: str = Header(None),
+):
     body = payload.dict()
     verify_request_signature(body, x_signature, x_timestamp, authorization)
     res = await upsert_student(body)
     return {"result": "added", **res}
 
+
 @app.post("/update")
-async def update_student(payload: StudentPayload, request: Request,
-                      x_signature: str = Header(None), x_timestamp: str = Header(None), authorization: str = Header(None)):
+async def update_student(
+    payload: StudentPayload,
+    request: Request,
+    x_signature: str = Header(None),
+    x_timestamp: str = Header(None),
+    authorization: str = Header(None),
+):
     body = payload.dict()
     verify_request_signature(body, x_signature, x_timestamp, authorization)
     res = await upsert_student(body)
@@ -247,8 +292,13 @@ async def update_student(payload: StudentPayload, request: Request,
 
 
 @app.post("/delete")
-async def delete_student(payload: StudentPayload, request: Request,
-                      x_signature: str = Header(None), x_timestamp: str = Header(None), authorization: str = Header(None)):
+async def delete_student(
+    payload: StudentPayload,
+    request: Request,
+    x_signature: str = Header(None),
+    x_timestamp: str = Header(None),
+    authorization: str = Header(None),
+):
     body = payload.dict()
     verify_request_signature(body, x_signature, x_timestamp, authorization)
     await database.execute(
@@ -260,17 +310,21 @@ async def delete_student(payload: StudentPayload, request: Request,
         """,
         values={
             "firstname": body["firstname"],
-            "lastname": body["lastname"],
+            "lastname":  body["lastname"],
             "birthdate": body["birthdate"],
         }
     )
     return {"result": "deleted"}
 
+
 @app.post("/search")
-async def search_student(payload: SearchPayload, request: Request,
-                      x_signature: str = Header(None),
-                      x_timestamp: str = Header(None),
-                      authorization: str = Header(None)):
+async def search_student(
+    payload: SearchPayload,
+    request: Request,
+    x_signature: str = Header(None),
+    x_timestamp: str = Header(None),
+    authorization: str = Header(None),
+):
     body = payload.dict()
     verify_request_signature(body, x_signature, x_timestamp, authorization)
 
@@ -288,14 +342,23 @@ async def search_student(payload: SearchPayload, request: Request,
     return {"found": True, "student": dict(row)}
 
 
-# ---- secured verification page ----
+# ---- secured verification page (للاستخدام الداخلي) ----
+
 @app.get("/verify")
-async def verify_page(firstname: str, lastname: str, birthdate: str,
-                      x_abi_key: str = Header(None), x_signature: str = Header(None), x_timestamp: str = Header(None)):
+async def verify_page(
+    firstname: str,
+    lastname: str,
+    birthdate: str,
+    x_abi_key: str = Header(None),
+    x_signature: str = Header(None),
+    x_timestamp: str = Header(None),
+):
     if x_abi_key != API_KEY:
         raise HTTPException(401, "Unauthorized")
+
     body = {"firstname": firstname, "lastname": lastname, "birthdate": birthdate}
     verify_request_signature(body, x_signature, x_timestamp, f"Bearer {API_KEY}")
+
     row = await database.fetch_one(
         """
         SELECT * FROM students
@@ -305,7 +368,7 @@ async def verify_page(firstname: str, lastname: str, birthdate: str,
         """,
         values={
             "firstname": firstname,
-            "lastname": lastname,
+            "lastname":  lastname,
             "birthdate": birthdate,
         }
     )
@@ -319,14 +382,13 @@ async def root():
     return {"status": "ok", "service": "fimonova_api"}
 
 
-
+# ---- حجم قاعدة البيانات ----
 
 @app.get("/db_size")
 async def get_db_size():
     """
     يرجّع حجم قاعدة البيانات الحالية بصيغة جميلة + النسبة من الحد الأقصى التقريبي.
     """
-    # نستخدم دالة PostgreSQL pg_database_size على قاعدة البيانات الحالية
     row = await database.fetch_one(
         """
         SELECT 
@@ -336,7 +398,6 @@ async def get_db_size():
     )
 
     if not row:
-        # حالة نادرة: لو الاستعلام ما رجع شيء
         raise HTTPException(500, "Cannot get database size")
 
     size_bytes = int(row["size_bytes"])
@@ -348,32 +409,22 @@ async def get_db_size():
 
     return {
         "size_bytes": size_bytes,
-        "size_pretty": size_pretty,   # مثال: '123 MB'
-        "used_percent": used_percent, # مثال: 12.34 أو None لو DB_MAX_BYTES=0
-        "max_bytes": DB_MAX_BYTES
+        "size_pretty": size_pretty,
+        "used_percent": used_percent,
+        "max_bytes": DB_MAX_BYTES,
     }
+
 
 @app.get("/wake")
 async def wake():
-    # ما في منطق، المهم يرجع بسرعة ويصحّي السيرفر
+    # فقط لإيقاظ السيرفر على Render
     return {"status": "awake"}
 
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-import re
 
-# --- تأكد من إضافة الـ CORS ---
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_PUBLIC_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# ---- واجهة التحقق العامة (لصفحة HTML) ----
 
 @app.post("/verify_public")
 async def verify_public(request: Request, payload: dict):
-
     # 1. التحقق من الـ Origin
     origin = request.headers.get("origin")
     if origin not in ALLOWED_PUBLIC_ORIGINS:
@@ -393,7 +444,7 @@ async def verify_public(request: Request, payload: dict):
         """
         SELECT firstname, lastname, cert_name, birthdate
         FROM students
-        WHERE cert_serial_sn = :sn
+        WHERE cert_serial_sn   = :sn
           AND cert_random_code = :rc
         """,
         values={"sn": serial, "rc": random_code}
@@ -406,10 +457,10 @@ async def verify_public(request: Request, payload: dict):
         "found": True,
         "student": {
             "firstname": row["firstname"],
-            "lastname": row["lastname"],
+            "lastname":  row["lastname"],
             "cert_name": row["cert_name"],
-            "birthdate": row["birthdate"]
-        }
+            "birthdate": row["birthdate"],
+        },
     }
 
 
@@ -421,49 +472,132 @@ async def wake_public(request: Request):
     return {"status": "awake"}
 
 
+# ---- نظام كلمة السر مع محاولات وقفل ----
+
 @app.post("/check_password")
-async def check_password_endpoint(
-    payload: PasswordPayload,
+async def check_password(
+    payload: PasswordCheckPayload,
     request: Request,
     x_signature: str = Header(None),
     x_timestamp: str = Header(None),
     authorization: str = Header(None),
 ):
-    # نستخدم نفس الدالة اللي عندك للتحقق من التوقيع
-    # تأكد إن اسمها صحيح (غالباً verify_request_signature)
+    """
+    يتحقق من كلمة السر مع:
+    - توقيع HMAC + API_KEY (verify_request_signature)
+    - عداد محاولات فاشلة
+    - قفل ربع ساعة بعد 3 محاولات خاطئة
+    """
     body = payload.dict()
     verify_request_signature(body, x_signature, x_timestamp, authorization)
 
-    row = await get_password_row()
-    if not row or not row["password_hash"]:
-        # لم يتم ضبط كلمة سر بعد
-        return {"ok": False, "reason": "no_password_configured"}
+    app_id = body.get("app_id") or DEFAULT_APP_ID
+    row = await get_or_create_app_password(app_id)
 
-    ok = hash_password(body["password"]) == row["password_hash"]
-    return {"ok": ok}
+    now = datetime.utcnow()
+    locked_until = row["locked_until"]
+    failed_attempts = row["failed_attemptments"] if "failed_attemptments" in row.keys() else row["failed_attempts"] or 0
 
+    # لو مقفول حالياً
+    if locked_until and locked_until > now:
+        retry_after = int((locked_until - now).total_seconds())
+        return {
+            "ok": False,
+            "reason": "locked",
+            "retry_after": retry_after,
+        }
+
+    # مقارنة كلمة السر
+    if hash_password(body["password"]) == row["password_hash"]:
+        # نرجّع العداد إلى الصفر
+        await database.execute(
+            """
+            UPDATE app_password
+               SET failed_attempts = 0,
+                   locked_until    = NULL
+             WHERE app_id = :app_id
+            """,
+            {"app_id": app_id},
+        )
+        return {"ok": True}
+
+    # كلمة سر خاطئة
+    failed_attempts += 1
+    locked_until_value = None
+    resp = {"ok": False, "reason": "invalid_password"}
+
+    if failed_attempts >= MAX_LOGIN_ATTEMPTS:
+        locked_until_value = now + timedelta(seconds=LOCK_SECONDS)
+        failed_attempts = 0
+        resp["locked"] = True
+        resp["retry_after"] = LOCK_SECONDS
+
+    await database.execute(
+        """
+        UPDATE app_password
+           SET failed_attempts = :failed_attempts,
+               locked_until    = :locked_until
+         WHERE app_id = :app_id
+        """,
+        {
+            "failed_attempts": failed_attempts,
+            "locked_until":    locked_until_value,
+            "app_id":          app_id,
+        },
+    )
+
+    return resp
 
 
 @app.post("/set_password")
-async def set_password_endpoint(
-    payload: ChangePasswordPayload,
+async def set_password(
+    payload: PasswordSetPayload,
     request: Request,
     x_signature: str = Header(None),
     x_timestamp: str = Header(None),
     authorization: str = Header(None),
 ):
+    """
+    تغيير كلمة السر:
+    - محمي بتوقيع HMAC + API_KEY
+    - يتحقق من كلمة السر القديمة
+    - يحترم حالة القفل (لو مقفول لا يسمح بالتغيير)
+    """
     body = payload.dict()
     verify_request_signature(body, x_signature, x_timestamp, authorization)
 
-    row = await get_password_row()
+    app_id = body.get("app_id") or DEFAULT_APP_ID
+    row = await get_or_create_app_password(app_id)
 
-    # لو عندنا باسورد قديم، نتحقق منه
-    if row and row["password_hash"]:
-        if hash_password(body["old_password"]) != row["password_hash"]:
-            raise HTTPException(status_code=400, detail="Old password is incorrect")
+    now = datetime.utcnow()
+    locked_until = row["locked_until"]
 
-    # لو ما كان في باسورد سابق، أو كان صح → نحدّث
-    await set_password_hash(hash_password(body["new_password"]))
+    if locked_until and locked_until > now:
+        retry_after = int((locked_until - now).total_seconds())
+        return {
+            "ok": False,
+            "reason": "locked",
+            "retry_after": retry_after,
+        }
+
+    # تحقق من old_password
+    if hash_password(body["old_password"]) != row["password_hash"]:
+        return {
+            "ok": False,
+            "reason": "old_password_wrong",
+        }
+
+    new_hash = hash_password(body["new_password"])
+    await database.execute(
+        """
+        UPDATE app_password
+           SET password_hash   = :password_hash,
+               failed_attempts = 0,
+               locked_until    = NULL
+         WHERE app_id = :app_id
+        """,
+        {"password_hash": new_hash, "app_id": app_id},
+    )
+
     return {"ok": True}
-
 

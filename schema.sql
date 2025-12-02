@@ -18,6 +18,14 @@ CREATE TABLE IF NOT EXISTS app_password (
   updated_at   TEXT
 );
 
+CREATE TABLE IF NOT EXISTS app_password (
+  id SERIAL PRIMARY KEY,
+  app_id TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  failed_attempts INTEGER NOT NULL DEFAULT 0,
+  locked_until TIMESTAMPTZ
+);
+
 
 CREATE INDEX IF NOT EXISTS idx_students_name_birth
 ON students (firstname, lastname, birthdate);
